@@ -1,0 +1,25 @@
+# 编译产物
+# 在项目目录下创建.gitignore
+touch .gitignore
+# 用vim编辑（也可以用nano，新手推荐nano）
+nano .gitignorebuild/
+*.o
+*.a
+*.so
+bin/
+
+# Qt 自动生成文件
+moc_*.cpp
+ui_*.h
+qrc_*.cpp
+*.qrc.depends
+
+# 操作系统/编辑器
+.DS_Store
+.vscode/
+.idea/
+*.user
+
+# 数据文件（你的 .raw 文件每个 30MB，GitHub 单个文件上限 100MB，建议忽略）
+data/
+result_figs/
