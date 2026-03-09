@@ -11,6 +11,9 @@
 #include <QMenu>
 #include <QAction>
 #include <QMouseEvent>
+#include <QFile>         // 【新增】：用于文件保存
+#include <QTextStream>   // 【新增】：用于文本流写入
+#include <QMessageBox>   // 【新增】：用于弹窗提示
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), m_worker(new DspWorker(this)) {
     setupUi();
@@ -33,19 +36,13 @@ MainWindow::~MainWindow() {
 }
 
 // =========================================================================
-// 【新增】：图表交互核心引擎，为任意图表注入拖拽、缩放、悬浮提示和右键菜单
+// 图表交互核心引擎
 // =========================================================================
 void MainWindow::setupPlotInteraction(QCustomPlot* plot) {
     if (!plot) return;
-
-    // 开启基础交互：鼠标左键拖拽平移、滚轮缩放
     plot->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
-
-    // 开启自定义右键菜单支持
     plot->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(plot, &QWidget::customContextMenuRequested, this, &MainWindow::onPlotContextMenu);
-
-    // 默认开启悬浮数值显示，并绑定鼠标移动和双击事件
     plot->setProperty("showTooltip", true);
     connect(plot, &QCustomPlot::mouseMove, this, &MainWindow::onPlotMouseMove);
     connect(plot, &QCustomPlot::mouseDoubleClick, this, &MainWindow::onPlotDoubleClick);
@@ -53,7 +50,6 @@ void MainWindow::setupPlotInteraction(QCustomPlot* plot) {
 
 void MainWindow::updatePlotOriginalRange(QCustomPlot* plot) {
     if (!plot) return;
-    // 记录下此刻的原始最佳视角，以便后续双击复原
     plot->setProperty("hasOrigRange", true);
     plot->setProperty("origXMin", plot->xAxis->range().lower);
     plot->setProperty("origXMax", plot->xAxis->range().upper);
@@ -103,17 +99,14 @@ void MainWindow::onPlotMouseMove(QMouseEvent *event) {
     QCustomPlot* plot = qobject_cast<QCustomPlot*>(sender());
     if (!plot || !plot->property("showTooltip").toBool()) return;
 
-    // 像素坐标转换为物理坐标
     double x = plot->xAxis->pixelToCoord(event->pos().x());
     double y = plot->yAxis->pixelToCoord(event->pos().y());
 
-    // 智能提取坐标轴的名称，让提示框显得极度专业
     QString xLabel = plot->xAxis->label().isEmpty() ? "X轴" : plot->xAxis->label();
     QString yLabel = plot->yAxis->label().isEmpty() ? "Y轴" : plot->yAxis->label();
 
     QString text = QString("%1: %2\n%3: %4").arg(xLabel).arg(x, 0, 'f', 2).arg(yLabel).arg(y, 0, 'f', 2);
 
-    // 探测是否含有色彩瀑布图 (ColorMap)，如果有则额外提取出第三维 Z 值
     for (int i = 0; i < plot->plottableCount(); ++i) {
         if (QCPColorMap* cmap = qobject_cast<QCPColorMap*>(plot->plottable(i))) {
             int keyBin, valueBin;
@@ -139,6 +132,7 @@ void MainWindow::onPlotDoubleClick(QMouseEvent *event) {
     }
     plot->replot();
 }
+
 // =========================================================================
 
 void MainWindow::setupUi() {
@@ -163,8 +157,8 @@ void MainWindow::setupUi() {
     m_btnSelectFiles = new QPushButton("📂 数据文件输入...", this);
     m_btnStart = new QPushButton("▶ 开始算法处理", this);
     m_btnPauseResume = new QPushButton("⏸ 暂停/继续", this);
-    m_btnStop = new QPushButton("⏹ 终止并导出", this);
-    m_btnExport = new QPushButton("💾 保存报表结果", this);
+    m_btnStop = new QPushButton("⏹ 终止算法", this);
+    m_btnExport = new QPushButton("💾 导出文本报表", this);
     m_btnStart->setEnabled(false); m_btnPauseResume->setEnabled(false); m_btnStop->setEnabled(false);
     btnLayout->addWidget(m_btnSelectFiles); btnLayout->addWidget(m_btnStart);
     btnLayout->addWidget(m_btnPauseResume); btnLayout->addWidget(m_btnStop); btnLayout->addWidget(m_btnExport);
@@ -422,25 +416,76 @@ void MainWindow::onStopClicked() {
     }
 }
 
-void MainWindow::onExportClicked() { appendLog("\n>> 数据导出模块加载中 (待实现)...\n"); }
 
+
+
+// =========================================================================
+// 【核心修改】：实现文本报表一键导出功能 (修复了中文乱码问题)
+// =========================================================================
+void MainWindow::onExportClicked() {
+    if (m_reportConsole->toPlainText().isEmpty() && m_logConsole->toPlainText().isEmpty()) {
+        QMessageBox::warning(this, "导出失败", "当前没有可导出的报表或日志数据！");
+        return;
+    }
+
+    QString defaultFileName = QString("SonarReport_%1.txt").arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    QString fileName = QFileDialog::getSaveFileName(this, "保存报表结果", defaultFileName, "Text Files (*.txt);;All Files (*)");
+
+    if (fileName.isEmpty()) return;
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::critical(this, "错误", "无法创建或打开文件以写入！");
+        return;
+    }
+
+    QTextStream out(&file);
+
+    // ==========================================================
+    // 【彻底修复乱码的核⼼代码】
+    // 强制 QTextStream 使用 UTF-8 编码，并写入 BOM (Byte Order Mark) 头
+    // 这样 Windows 记事本打开时会自动识别为 UTF-8，绝对不会再乱码！
+    // ==========================================================
+#if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
+    out.setCodec("UTF-8");
+#endif
+    out.setGenerateByteOrderMark(true);
+
+    // 使用 QString 包裹硬编码的中文字符串，确保底层以 Unicode 安全传递
+    out << "======================================================\n";
+    out << QString("          SonarTrackerPro 综合分析导出报表\n");
+    out << QString("          导出时间: ") << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
+    out << "======================================================\n\n";
+
+    out << QString("【一、综合评估终端结果】\n");
+    out << m_reportConsole->toPlainText() << "\n\n";
+
+    out << "======================================================\n";
+    out << QString("【二、系统运行实时追踪流水日志】\n");
+    out << m_logConsole->toPlainText() << "\n";
+
+    file.close();
+
+    appendLog(QString("\n>> 成功：分析报表已完整导出至 %1\n").arg(fileName));
+    QMessageBox::information(this, "导出成功", "综合评估报表及运行日志已成功导出！\n(注：图表图片请在对应图表上右键保存)");
+}
 void MainWindow::createTargetPlots(int targetId) {
     QCustomPlot* lsPlot = new QCustomPlot(this);
-    setupPlotInteraction(lsPlot); // 【赋予交互】
+    setupPlotInteraction(lsPlot);
     lsPlot->setMinimumHeight(200); lsPlot->addGraph(); lsPlot->graph(0)->setPen(QPen(Qt::red, 1.5));
     lsPlot->xAxis->setLabel("频率/Hz"); lsPlot->yAxis->setLabel("功率/dB");
     lsPlot->xAxis->setRange(m_currentConfig.lofarMin, m_currentConfig.lofarMax); lsPlot->yAxis->setRange(-60, 40);
     lsPlot->plotLayout()->insertRow(0); lsPlot->plotLayout()->addElement(0, 0, new QCPTextElement(lsPlot, "", QFont("sans", 9, QFont::Bold)));
 
     QCustomPlot* lofarPlot = new QCustomPlot(this);
-    setupPlotInteraction(lofarPlot); // 【赋予交互】
+    setupPlotInteraction(lofarPlot);
     lofarPlot->setMinimumHeight(200); lofarPlot->addGraph(); lofarPlot->graph(0)->setPen(QPen(Qt::blue, 1.5));
     lofarPlot->xAxis->setLabel("频率/Hz"); lofarPlot->yAxis->setLabel("功率/dB");
     lofarPlot->xAxis->setRange(m_currentConfig.lofarMin, m_currentConfig.lofarMax); lofarPlot->yAxis->setRange(-60, 40);
     lofarPlot->plotLayout()->insertRow(0); lofarPlot->plotLayout()->addElement(0, 0, new QCPTextElement(lofarPlot, "", QFont("sans", 9, QFont::Bold)));
 
     QCustomPlot* demonPlot = new QCustomPlot(this);
-    setupPlotInteraction(demonPlot); // 【赋予交互】
+    setupPlotInteraction(demonPlot);
     demonPlot->setMinimumHeight(200); demonPlot->addGraph(); demonPlot->graph(0)->setPen(QPen(Qt::darkGreen, 1.5));
     demonPlot->xAxis->setLabel("频率/Hz"); demonPlot->yAxis->setLabel("归一幅度");
     demonPlot->xAxis->setRange(0, 100); demonPlot->yAxis->setRange(0, 1.1);
@@ -458,7 +503,7 @@ void MainWindow::onFrameProcessed(const FrameResult& result) {
     m_spatialPlot->graph(1)->setData(result.thetaAxis, result.dcvData);
     m_plotTitle->setText(QString("宽带空间谱实时折线图 (第%1帧 | 时间: %2s)").arg(result.frameIndex).arg(result.timestamp));
     m_spatialPlot->replot();
-    updatePlotOriginalRange(m_spatialPlot); // 更新缓存原始视角
+    updatePlotOriginalRange(m_spatialPlot);
 
     for (double ang : result.detectedAngles) m_timeAzimuthPlot->graph(0)->addData(ang, result.timestamp);
     m_timeAzimuthPlot->yAxis->setRange(std::max(0.0, result.timestamp - 30.0), result.timestamp + 5.0);
@@ -512,7 +557,7 @@ void MainWindow::onOfflineResultsReady(const QList<OfflineTargetResult>& results
     int col = 0;
     for (const auto& res : results) {
         QCustomPlot* pRaw = new QCustomPlot(m_lofarWaterfallWidget);
-        setupPlotInteraction(pRaw); // 【赋予交互】
+        setupPlotInteraction(pRaw);
         pRaw->setMinimumSize(400, 250); m_lofarWaterfallLayout->addWidget(pRaw, 0, col);
         pRaw->plotLayout()->insertRow(0);
         pRaw->plotLayout()->addElement(0, 0, new QCPTextElement(pRaw, QString("目标%1 原始LOFAR谱 (自适应局部放大)").arg(res.targetId), QFont("sans", 10, QFont::Bold)));
@@ -527,7 +572,7 @@ void MainWindow::onOfflineResultsReady(const QList<OfflineTargetResult>& results
         updatePlotOriginalRange(pRaw);
 
         QCustomPlot* pTpsw = new QCustomPlot(m_lofarWaterfallWidget);
-        setupPlotInteraction(pTpsw); // 【赋予交互】
+        setupPlotInteraction(pTpsw);
         pTpsw->setMinimumSize(400, 250); m_lofarWaterfallLayout->addWidget(pTpsw, 1, col);
         pTpsw->plotLayout()->insertRow(0); pTpsw->plotLayout()->addElement(0, 0, new QCPTextElement(pTpsw, "历史LOFAR谱 (TPSW背景均衡)", QFont("sans", 10, QFont::Bold)));
         QCPColorMap *cmapTpsw = new QCPColorMap(pTpsw->xAxis, pTpsw->yAxis);
@@ -541,7 +586,7 @@ void MainWindow::onOfflineResultsReady(const QList<OfflineTargetResult>& results
         updatePlotOriginalRange(pTpsw);
 
         QCustomPlot* pDp = new QCustomPlot(m_lofarWaterfallWidget);
-        setupPlotInteraction(pDp); // 【赋予交互】
+        setupPlotInteraction(pDp);
         pDp->setMinimumSize(400, 250); m_lofarWaterfallLayout->addWidget(pDp, 2, col);
         pDp->plotLayout()->insertRow(0); pDp->plotLayout()->addElement(0, 0, new QCPTextElement(pDp, "专属线谱连续轨迹图 (DP寻优)", QFont("sans", 10, QFont::Bold)));
         QCPColorMap *cmapDp = new QCPColorMap(pDp->xAxis, pDp->yAxis);
