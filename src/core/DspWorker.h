@@ -1,7 +1,9 @@
 #pragma once
 #include <QThread>
-#include <QString>     // <--- 注意这里
+#include <QString>
+#include <atomic>
 #include "DataTypes.h"
+#include "detect_line_spectrum_from_lofar_change.h"
 
 class DspWorker : public QThread {
     Q_OBJECT
@@ -11,19 +13,25 @@ public:
 
     void setDirectory(const QString& dirPath);
     void stop();
+    void pause();
+    void resume();
+    bool isPaused() const { return m_isPaused; }
 
 signals:
-    // 每处理完一帧，发射此信号通知 UI 绘图
     void frameProcessed(const FrameResult& result);
-    // 专门用于发送系统日志的信号
     void logReady(const QString& log);
-    // 批量处理完成信号
+    void reportReady(const QString& report);
+
+    // 【新增】：专门用于传递离线 DP 矩阵结果的信号
+    void offlineResultsReady(const QList<OfflineTargetResult>& results);
+
     void processingFinished();
 
 protected:
     void run() override;
 
 private:
-    QString m_directory; // <--- 【核心修复】：这里必须是 QString，不能是 QStringList
-    bool m_isRunning;
+    QString m_directory;
+    std::atomic<bool> m_isRunning;
+    std::atomic<bool> m_isPaused;
 };

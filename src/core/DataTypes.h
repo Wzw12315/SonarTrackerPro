@@ -3,37 +3,56 @@
 #include <QList>
 #include <QString>
 #include <QMetaType>
+#include <vector>
 
-// 定义单个目标的航迹状态 (对应 MATLAB 动态跟踪池)
+// 定义单个目标的实时航迹状态
 struct TargetTrack {
-    int id;               // 目标编号 (从 1 开始)
-    bool isActive;        // 是否存活 (跟踪中为 true，丢失熄火为 false)
-    int missedCount;      // 连续丢失帧数
-    double currentAngle;  // 当前帧的物理方位角
-    int currentLoc;       // 当前帧的方位角索引 (用于后续提取提取信号)
+    int id;
+    bool isActive;
+    int missedCount;
+    double currentAngle;
+    int currentLoc;
 
-    QVector<double> lofarSpectrum;  // 当前帧的 LOFAR 功率谱 (dB)
-    QVector<double> demonSpectrum;  // 当前帧的 DEMON 包络谱 (归一化幅度)
+    QVector<double> lofarSpectrum;
+    QVector<double> demonSpectrum;
+    QVector<double> lineSpectrumAmp;
 
-    std::vector<double> lineSpectra;// 提取到的高频线谱 (Hz)
-    double shaftFreq;               // 提取到的低频轴频 (Hz)，如果没有则为 0.0
+    // 用于保存完整的线性功率谱 (0~fs/2)，供离线DP算法使用
+    QVector<double> lofarFullLinear;
+
+    std::vector<double> lineSpectra;
+    double shaftFreq;
 };
-
-// 注册元类型
 Q_DECLARE_METATYPE(TargetTrack)
 
-// 单帧处理结果的结构体
+// 单帧实时处理结果
 struct FrameResult {
     int frameIndex;
-        double timestamp;
-        QVector<double> thetaAxis;
-        QVector<double> cbfData;
-        QVector<double> dcvData;
-        QString logMessage;
-        QList<TargetTrack> tracks;// 这一帧的所有被跟踪的目标
-
-
-
+    double timestamp;
+    QVector<double> thetaAxis;
+    QVector<double> cbfData;
+    QVector<double> dcvData;
+    QVector<double> detectedAngles;
+    QString logMessage;
+    QList<TargetTrack> tracks;
 };
-
 Q_DECLARE_METATYPE(FrameResult)
+
+// 单目标离线 DP 算法完整特征包
+struct OfflineTargetResult {
+    int targetId;
+    double startAngle;
+    int timeFrames;
+    int freqBins;
+    double minTime;
+    double maxTime;
+
+    // 【新增】：根据历史线谱动态算出的最佳显示频段
+    double displayFreqMin;
+    double displayFreqMax;
+
+    QVector<double> rawLofarDb;
+    QVector<double> tpswLofarDb;
+    QVector<double> dpCounter;
+};
+Q_DECLARE_METATYPE(QList<OfflineTargetResult>)

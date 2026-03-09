@@ -50,6 +50,8 @@ set(SOURCES
     src/core/TrackManager.h
     src/core/Deconvolution.cpp
     src/core/Deconvolution.h
+    src/core/detect_line_spectrum_from_lofar_change.h
+    src/core/detect_line_spectrum_from_lofar_change.cpp
     3rdparty/qcustomplot/qcustomplot.cpp
     3rdparty/qcustomplot/qcustomplot.h
 )
