@@ -5,6 +5,43 @@
 #include <QMetaType>
 #include <vector>
 
+// 全局信号处理配置参数
+struct DspConfig {
+    // 阵列与声学环境
+    double fs = 5000.0;
+    int M = 512;
+    double d = 1.2;
+    double c = 1500.0;
+    double r_scan = 9000.0;
+    double timeStep = 3.0;
+
+    // 频带与谱估计
+    double lofarMin = 80.0;
+    double lofarMax = 250.0;
+    double demonMin = 350.0;
+    double demonMax = 2000.0;
+    int nfftR = 15000;
+    int nfftWin = 30000;
+
+    // 【新增】：实时 LOFAR 线谱提取参数
+    int lofarBgMedWindow = 150;      // 中值滤波平滑窗宽
+    double lofarSnrThreshMult = 2.5; // SNR 阈值乘数
+    int lofarPeakMinDist = 30;       // 寻峰最小间距 (点数)
+
+    // DEMON 包络滤波
+    int firOrder = 64;
+    double firCutoff = 0.1;
+
+    // TPSW 与 DP 寻优
+    double tpswG = 45.0;
+    double tpswE = 2.0;
+    int dpL = 5;
+    double dpAlpha = 1.5;
+    double dpBeta = 1.0;
+    double dpGamma = 0.1;
+};
+Q_DECLARE_METATYPE(DspConfig)
+
 // 定义单个目标的实时航迹状态
 struct TargetTrack {
     int id;
@@ -16,10 +53,7 @@ struct TargetTrack {
     QVector<double> lofarSpectrum;
     QVector<double> demonSpectrum;
     QVector<double> lineSpectrumAmp;
-
-    // 用于保存完整的线性功率谱 (0~fs/2)，供离线DP算法使用
     QVector<double> lofarFullLinear;
-
     std::vector<double> lineSpectra;
     double shaftFreq;
 };
@@ -47,7 +81,6 @@ struct OfflineTargetResult {
     double minTime;
     double maxTime;
 
-    // 【新增】：根据历史线谱动态算出的最佳显示频段
     double displayFreqMin;
     double displayFreqMax;
 

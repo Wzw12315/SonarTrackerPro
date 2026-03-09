@@ -10,15 +10,16 @@
 #include "Deconvolution.h"
 #include "TrackManager.h"
 #include "detect_line_spectrum_from_lofar_change.h"
+#include "fir2.h"
 #include <fftw3.h>
 #include <cmath>
 
+// ... [此处保留所有的 static 辅助工具函数：calculateMedian, findPeaks, medfilt1 不变] ...
 static double calculateMedian(std::vector<double> v) {
     if (v.empty()) return 0.0;
     std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
     return v[v.size() / 2];
 }
-
 static std::vector<int> findPeaks(const Eigen::VectorXd& data, int minPeakDistance) {
     std::vector<std::pair<double, int>> all_peaks;
     for (int i = 1; i < data.size() - 1; ++i) {
@@ -36,7 +37,6 @@ static std::vector<int> findPeaks(const Eigen::VectorXd& data, int minPeakDistan
     std::sort(valid_peaks.begin(), valid_peaks.end());
     return valid_peaks;
 }
-
 static Eigen::VectorXd medfilt1(const Eigen::VectorXd& x, int w) {
     Eigen::VectorXd res(x.size());
     int half_w = w / 2;
@@ -49,28 +49,13 @@ static Eigen::VectorXd medfilt1(const Eigen::VectorXd& x, int w) {
     return res;
 }
 
-static Eigen::VectorXd apply_fir_lowpass(const Eigen::VectorXd& x) {
-    std::vector<double> b = {
-        -0.0011, -0.0018, -0.0022, -0.0016, 0.0004, 0.0039, 0.0084, 0.0131, 0.0169, 0.0185, 0.0170, 0.0116,
-        0.0023, -0.0099, -0.0232, -0.0354, -0.0441, -0.0471, -0.0425, -0.0289, -0.0058, 0.0264, 0.0664,
-        0.1118, 0.1595, 0.2062, 0.2486, 0.2834, 0.3081, 0.3210, 0.3210, 0.3081, 0.2834, 0.2486, 0.2062,
-        0.1595, 0.1118, 0.0664, 0.0264, -0.0058, -0.0289, -0.0425, -0.0471, -0.0441, -0.0354, -0.0232,
-        -0.0099, 0.0023, 0.0116, 0.0170, 0.0185, 0.0169, 0.0131, 0.0084, 0.0039, 0.0004, -0.0016, -0.0022,
-        -0.0018, -0.0011
-    };
-    Eigen::VectorXd y = Eigen::VectorXd::Zero(x.size());
-    for (int i = 0; i < x.size(); ++i) {
-        for (int j = 0; j < (int)b.size(); ++j) { if (i - j >= 0) y(i) += b[j] * x(i - j); }
-    }
-    return y;
-}
-
 DspWorker::DspWorker(QObject *parent) : QThread(parent), m_isRunning(false), m_isPaused(false) {
     qRegisterMetaType<FrameResult>("FrameResult");
     qRegisterMetaType<QList<OfflineTargetResult>>("QList<OfflineTargetResult>");
 }
 DspWorker::~DspWorker() { stop(); wait(); }
 void DspWorker::setDirectory(const QString& dirPath) { m_directory = dirPath; }
+void DspWorker::setConfig(const DspConfig& config) { m_config = config; } // 【新增】
 void DspWorker::stop() { m_isRunning = false; }
 void DspWorker::pause() { m_isPaused = true; }
 void DspWorker::resume() { m_isPaused = false; }
@@ -90,12 +75,20 @@ void DspWorker::run() {
         if(match.hasMatch()) timeToFilesMap[match.captured(1).toDouble()].append(filePath);
     }
 
-    const int M = 512; const double d = 1.2; const double c = 1500.0;
-    const int fs = 5000; const int NFFT_R = 15000; const int NFFT_WIN = 30000;
+    // 【核心修改】：全部使用用户传入的专业参数
+    const int M = m_config.M;
+    const double d = m_config.d;
+    const double c = m_config.c;
+    const int fs = m_config.fs;
+    const int NFFT_R = m_config.nfftR;
+    const int NFFT_WIN = m_config.nfftWin;
+    const double r_scan = m_config.r_scan;
     const int f_show = 100;
-    int half_fft = NFFT_WIN / 2 + 1; // 15001
+    int half_fft = NFFT_WIN / 2 + 1;
 
-    CBFProcessor cbf_engine(M, d, c, 9000.0, fs, NFFT_R, NFFT_WIN, {80, 250}, {350, 2000});
+    CBFProcessor cbf_engine(M, d, c, r_scan, fs, NFFT_R, NFFT_WIN,
+                            {m_config.lofarMin, m_config.lofarMax},
+                            {m_config.demonMin, m_config.demonMax});
 
     Eigen::MatrixXd theta_scan = cbf_engine.getThetaScan().transpose();
     Eigen::MatrixXd f_lofar = cbf_engine.getFLofar().transpose();
@@ -110,6 +103,19 @@ void DspWorker::run() {
     double* demon_fft_in = (double*)fftw_malloc(sizeof(double) * NFFT_WIN);
     fftw_complex* demon_fft_out = (fftw_complex*)fftw_malloc(sizeof(fftw_complex) * NFFT_WIN);
     fftw_plan plan_fft = fftw_plan_dft_r2c_1d(NFFT_WIN, demon_fft_in, demon_fft_out, FFTW_ESTIMATE);
+
+    // 【修改】：使用动态参数生成 FIR 包络滤波器
+    FirWinPara demon_fir_para;
+    FirWinRtn demon_fir_rtn;
+    demon_fir_para.band = LOWPASSFILTER;
+    demon_fir_para.fln = m_config.firCutoff * (fs / 2.0);
+    demon_fir_para.n = m_config.firOrder;
+    demon_fir_para.type = Hamming;
+    demon_fir_para.fs = fs;
+    FirWin(&demon_fir_para, &demon_fir_rtn);
+
+    std::vector<double> demon_lpf_coefs(demon_fir_rtn.h.size());
+    for (int i = 0; i < demon_fir_rtn.h.size(); ++i) demon_lpf_coefs[i] = demon_fir_rtn.h(i);
 
     Eigen::MatrixXd signal_w = Eigen::MatrixXd::Zero(M, NFFT_WIN);
     TrackManager trackManager;
@@ -176,20 +182,29 @@ void DspWorker::run() {
                     Eigen::VectorXd spectrum_db = (p_out_single.array() + 1e-12).log10() * 10.0;
                     t.lofarSpectrum = QVector<double>(spectrum_db.data(), spectrum_db.data() + spectrum_db.size());
 
-                    Eigen::VectorXd background_db = medfilt1(spectrum_db, 150);
+                    // =========================================================
+                    // 【核心替换】：应用 UI 面板设置的实时 LOFAR 提取参数
+                    // =========================================================
+                    // 1. 中值滤波平滑窗宽 (原 150)
+                    Eigen::VectorXd background_db = medfilt1(spectrum_db, m_config.lofarBgMedWindow);
                     Eigen::VectorXd snr_db = spectrum_db - background_db;
                     double mean_snr = snr_db.mean();
                     double std_snr = std::sqrt((snr_db.array() - mean_snr).square().sum() / snr_db.size());
-                    double threshold_ls = mean_snr + 2.5 * std_snr;
+
+                    // 2. SNR 阈值乘数 (原 2.5)
+                    double threshold_ls = mean_snr + m_config.lofarSnrThreshMult * std_snr;
 
                     for(int i=0; i<snr_db.size(); ++i) if(snr_db(i) < threshold_ls || snr_db(i) < 0) snr_db(i) = 0;
-                    std::vector<int> locs_ls = findPeaks(snr_db, 30);
+
+                    // 3. 寻峰最小点数间距 (原 30)
+                    std::vector<int> locs_ls = findPeaks(snr_db, m_config.lofarPeakMinDist);
 
                     t.lineSpectrumAmp = QVector<double>(spectrum_db.size(), -150.0);
                     for(int idx : locs_ls) {
                         t.lineSpectra.push_back(cbf_engine.getFLofar()(idx));
                         t.lineSpectrumAmp[idx] = spectrum_db(idx);
                     }
+                    // =========================================================
 
                     Eigen::VectorXd full_lofar_linear = Eigen::VectorXd::Constant(half_fft, 1e-12);
                     double df_calc = fs / (double)NFFT_WIN;
@@ -199,6 +214,7 @@ void DspWorker::run() {
                         if(bin >= 0 && bin < half_fft) full_lofar_linear(bin) = p_out_single(k);
                     }
                     t.lofarFullLinear = QVector<double>(full_lofar_linear.data(), full_lofar_linear.data() + full_lofar_linear.size());
+                    // ... (后面代码保持不变)
 
                     std::complex<double> J(0, 1);
                     Eigen::MatrixXd Phase_demon = 2.0 * M_PI * tau_mat.row(t.currentLoc).transpose() * f_demon;
@@ -206,7 +222,7 @@ void DspWorker::run() {
                     Eigen::RowVectorXcd beam_f_demon = (cbf_res.signal_fft_demon.array() * W_steer_demon.array()).colwise().sum();
 
                     memset(demon_ifft_in, 0, sizeof(fftw_complex) * NFFT_WIN);
-                    int demon_start_idx = 350 * NFFT_WIN / fs;
+                    int demon_start_idx = std::round(m_config.demonMin * NFFT_WIN / fs); // 使用参数
                     for(int i=0; i<beam_f_demon.size(); ++i) {
                         demon_ifft_in[demon_start_idx + i][0] = beam_f_demon(i).real();
                         demon_ifft_in[demon_start_idx + i][1] = beam_f_demon(i).imag();
@@ -215,7 +231,10 @@ void DspWorker::run() {
 
                     Eigen::VectorXd rs_square(NFFT_WIN);
                     for(int i=0; i<NFFT_WIN; ++i) rs_square(i) = demon_ifft_out[i] * demon_ifft_out[i];
-                    Eigen::VectorXd envlf = apply_fir_lowpass(rs_square);
+
+                    FIR fir_demon(demon_lpf_coefs.data(), demon_lpf_coefs.size());
+                    Eigen::VectorXd envlf(NFFT_WIN);
+                    for(int i = 0; i < NFFT_WIN; ++i) envlf(i) = fir_demon.filter(rs_square(i));
                     Eigen::VectorXd s = envlf.array() - envlf.mean();
 
                     for(int i=0; i<NFFT_WIN; ++i) demon_fft_in[i] = s(i);
@@ -280,161 +299,143 @@ void DspWorker::run() {
     if (!m_isRunning) return;
 
     double total_time_sec = globalTimer.elapsed() / 1000.0;
+    QString report = "\n======================================================\n                 高级航迹管理评估报告                 \n======================================================\n";
+    report += "【系统级总体评价】\n";
+    report += QString("  ▶ 全流程总计耗时: %1 秒\n").arg(total_time_sec, 0, 'f', 2);
+    report += QString("  ▶ 总计稳定识别目标个数: %1 个\n\n").arg(trackManager.getTotalTargetCount());
 
-    // ==============================================================
-        // 构建：系统综合评估报告
-        // ==============================================================
-        QString report = "\n======================================================\n";
-        report += "                 高级航迹管理评估报告                 \n";
-        report += "======================================================\n";
-        report += "【系统级总体评价】\n";
-        report += QString("  ▶ 全流程总计耗时: %1 秒\n").arg(total_time_sec, 0, 'f', 2);
-        report += QString("  ▶ 总计稳定识别目标个数: %1 个\n\n").arg(trackManager.getTotalTargetCount());
+    report += "======================================================\n       目标最终特征提取池 (聚类线谱 + 统计轴频)       \n======================================================\n";
 
-        report += "======================================================\n";
-        report += "       目标最终特征提取池 (聚类线谱 + 统计轴频)       \n";
-        report += "======================================================\n";
-
-        for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
-            std::vector<double> freqs, shafts;
-            int active_frames = 0;
-
-            for (const auto& frame : history_frames) {
-                for (const auto& t : frame.tracks) {
-                    if (t.id == tid && t.isActive) {
-                        active_frames++;
-                        if (t.shaftFreq > 0) shafts.push_back(t.shaftFreq);
-                        for (double f : t.lineSpectra) freqs.push_back(f);
-                    }
+    for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
+        std::vector<double> freqs, shafts;
+        int active_frames = 0;
+        for (const auto& frame : history_frames) {
+            for (const auto& t : frame.tracks) {
+                if (t.id == tid && t.isActive) {
+                    active_frames++;
+                    if (t.shaftFreq > 0) shafts.push_back(t.shaftFreq);
+                    for (double f : t.lineSpectra) freqs.push_back(f);
                 }
             }
-            if (active_frames == 0) continue;
-
-            std::sort(freqs.begin(), freqs.end());
-            QString freqStr;
-            if (freqs.empty()) {
-                freqStr = "未检测到";
-            } else {
-                std::vector<double> final_f; std::vector<int> final_c;
-                std::vector<double> cur_cluster; cur_cluster.push_back(freqs[0]);
-                for (size_t i = 1; i < freqs.size(); ++i) {
-                    if (freqs[i] - freqs[i-1] > 2.0) {
-                        final_f.push_back(calculateMedian(cur_cluster));
-                        final_c.push_back(cur_cluster.size());
-                        cur_cluster.clear();
-                    }
-                    cur_cluster.push_back(freqs[i]);
-                }
-                final_f.push_back(calculateMedian(cur_cluster)); final_c.push_back(cur_cluster.size());
-
-                for (size_t i = 0; i < final_f.size(); ++i) {
-                    freqStr += QString("%1Hz(%2/%3)").arg(final_f[i], 0, 'f', 1).arg(final_c[i]).arg(active_frames);
-                    if (i != final_f.size() - 1) freqStr += ", ";
-                }
-            }
-            double median_shaft = shafts.empty() ? 0.0 : calculateMedian(shafts);
-
-            report += QString("  ▶ 目标 %1 [高频线谱] : %2 \n").arg(tid).arg(freqStr);
-            if (median_shaft > 0) report += QString("             [低频轴频] : 稳定中心约 %1 Hz\n").arg(median_shaft, 0, 'f', 1);
-            else report += QString("             [低频轴频] : 未检测到\n");
         }
+        if (active_frames == 0) continue;
 
-        report += "\n======================================================\n";
-        report += "                目标每帧方位角动态跟踪表              \n";
-        report += "======================================================\n";
-        QString h1 = "| 帧号   | 时间(s)  ";
-        for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) h1 += QString("| 目标%1 ").arg(QString::number(tid).leftJustified(4, ' '));
-        report += h1 + "|\n|--------|----------" + QString("|------------").repeated(trackManager.getTotalTargetCount()) + "|\n";
-        for (const auto& f : history_frames) {
-            QString row = QString("| %1 | %2 ").arg(f.frameIndex, -6).arg(f.timestamp, -8, 'f', 1);
-            for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
-                double ang = -1;
-                for(auto& tr : f.tracks) if(tr.id == tid) ang = tr.currentAngle;
-                if(ang >= 0) row += QString("| %1 ").arg(ang, -10, 'f', 1); else row += "| -          ";
-            }
-            report += row + "|\n";
-        }
-        report += "======================================================\n";
-        emit reportReady(report);
-
-        // ==============================================================
-        // 【核心离线处理】：调用 DP 算法，生成 Tab 3 数据，并计算自适应显示频段
-        // ==============================================================
-        QList<OfflineTargetResult> offResults;
-
-        for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
-            std::vector<QVector<double>> tHistory;
-            double startAng = -1.0;
-
-            // 动态追踪该目标的线谱极值，以决定最终图表的显示缩放倍率
-            double minFoundFreq = 9999.0;
-            double maxFoundFreq = -9999.0;
-
-            for (const auto& f : history_frames) {
-                for (const auto& tr : f.tracks) {
-                    if (tr.id == tid) {
-                        tHistory.push_back(tr.lofarFullLinear);
-                        if (startAng < 0 && tr.isActive) startAng = tr.currentAngle;
-                        if (tr.isActive && !tr.lineSpectra.empty()) {
-                            for(double f_line : tr.lineSpectra) {
-                                if(f_line < minFoundFreq) minFoundFreq = f_line;
-                                if(f_line > maxFoundFreq) maxFoundFreq = f_line;
-                            }
-                        }
-                        break;
-                    }
+        std::sort(freqs.begin(), freqs.end());
+        QString freqStr = "未检测到";
+        if (!freqs.empty()) {
+            freqStr = "";
+            std::vector<double> final_f; std::vector<int> final_c;
+            std::vector<double> cur_cluster; cur_cluster.push_back(freqs[0]);
+            for (size_t i = 1; i < freqs.size(); ++i) {
+                if (freqs[i] - freqs[i-1] > 2.0) {
+                    final_f.push_back(calculateMedian(cur_cluster));
+                    final_c.push_back(cur_cluster.size());
+                    cur_cluster.clear();
                 }
+                cur_cluster.push_back(freqs[i]);
             }
-            if (tHistory.empty() || tHistory[0].isEmpty()) continue;
+            final_f.push_back(calculateMedian(cur_cluster)); final_c.push_back(cur_cluster.size());
 
-            int M_time = tHistory.size();
-            Eigen::MatrixXd lofar_mat = Eigen::MatrixXd::Zero(M_time, half_fft);
-            for (int r = 0; r < M_time; ++r) {
-                for (int c = 0; c < half_fft; ++c) lofar_mat(r, c) = tHistory[r][c];
+            for (size_t i = 0; i < final_f.size(); ++i) {
+                freqStr += QString("%1Hz(%2/%3)").arg(final_f[i], 0, 'f', 1).arg(final_c[i]).arg(active_frames);
+                if (i != final_f.size() - 1) freqStr += ", ";
             }
-
-            Eigen::RowVectorXd center_freq, f_stft, t_stft;
-            Eigen::MatrixXd Z_TPSW;
-            Eigen::MatrixXi counter;
-            detect_line_spectrum_from_lofar_change(lofar_mat, fs, NFFT_R, center_freq, Z_TPSW, counter, f_stft, t_stft);
-
-            OfflineTargetResult offRes;
-            offRes.targetId = tid;
-            offRes.startAngle = startAng;
-            offRes.timeFrames = M_time;
-            offRes.freqBins = half_fft;
-            offRes.minTime = history_frames.front().timestamp;
-            offRes.maxTime = history_frames.back().timestamp;
-            if (std::abs(offRes.maxTime - offRes.minTime) < 0.1) offRes.maxTime += 3.0;
-
-            // 【新增】：根据实际检测到的线谱，计算最佳观察窗，前后留 20Hz 缓冲
-            if (minFoundFreq > maxFoundFreq) {
-                // 没有检测到明显线谱，给一个默认的基础观察窗
-                offRes.displayFreqMin = 80.0;
-                offRes.displayFreqMax = 250.0;
-            } else {
-                offRes.displayFreqMin = std::max(0.0, minFoundFreq - 20.0);
-                offRes.displayFreqMax = std::min(fs / 2.0, maxFoundFreq + 20.0);
-            }
-
-            offRes.rawLofarDb.resize(M_time * half_fft);
-            offRes.tpswLofarDb.resize(M_time * half_fft);
-            offRes.dpCounter.resize(M_time * half_fft);
-
-            for (int r = 0; r < M_time; ++r) {
-                for (int c = 0; c < half_fft; ++c) {
-                    int idx = r * half_fft + c;
-                    offRes.rawLofarDb[idx] = 10.0 * log10(lofar_mat(r, c) + 1e-12);
-                    offRes.tpswLofarDb[idx] = 10.0 * log10(Z_TPSW(r, c) + 1e-12);
-                    offRes.dpCounter[idx] = (counter(c, r) >= 4) ? counter(c, r) : 0.0;
-                }
-            }
-            offResults.append(offRes);
         }
-
-        emit offlineResultsReady(offResults);
-
-        fftw_destroy_plan(plan_ifft); fftw_free(demon_ifft_in); fftw_free(demon_ifft_out);
-        fftw_destroy_plan(plan_fft);  fftw_free(demon_fft_in);  fftw_free(demon_fft_out);
-        emit processingFinished();
+        double median_shaft = shafts.empty() ? 0.0 : calculateMedian(shafts);
+        report += QString("  ▶ 目标 %1 [高频线谱] : %2 \n").arg(tid).arg(freqStr);
+        if (median_shaft > 0) report += QString("             [低频轴频] : 稳定中心约 %1 Hz\n").arg(median_shaft, 0, 'f', 1);
+        else report += QString("             [低频轴频] : 未检测到\n");
     }
+
+    report += "\n======================================================\n                目标每帧方位角动态跟踪表              \n======================================================\n";
+    QString h1 = "| 帧号   | 时间(s)  ";
+    for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) h1 += QString("| 目标%1 ").arg(QString::number(tid).leftJustified(4, ' '));
+    report += h1 + "|\n|--------|----------" + QString("|------------").repeated(trackManager.getTotalTargetCount()) + "|\n";
+    for (const auto& f : history_frames) {
+        QString row = QString("| %1 | %2 ").arg(f.frameIndex, -6).arg(f.timestamp, -8, 'f', 1);
+        for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
+            double ang = -1;
+            for(auto& tr : f.tracks) if(tr.id == tid) ang = tr.currentAngle;
+            if(ang >= 0) row += QString("| %1 ").arg(ang, -10, 'f', 1); else row += "| -          ";
+        }
+        report += row + "|\n";
+    }
+    report += "======================================================\n";
+    emit reportReady(report);
+
+    QList<OfflineTargetResult> offResults;
+    for (int tid = 1; tid <= trackManager.getTotalTargetCount(); ++tid) {
+        std::vector<QVector<double>> tHistory;
+        double startAng = -1.0;
+        double minFoundFreq = 9999.0;
+        double maxFoundFreq = -9999.0;
+
+        for (const auto& f : history_frames) {
+            for (const auto& tr : f.tracks) {
+                if (tr.id == tid) {
+                    tHistory.push_back(tr.lofarFullLinear);
+                    if (startAng < 0 && tr.isActive) startAng = tr.currentAngle;
+                    if (tr.isActive && !tr.lineSpectra.empty()) {
+                        for(double f_line : tr.lineSpectra) {
+                            if(f_line < minFoundFreq) minFoundFreq = f_line;
+                            if(f_line > maxFoundFreq) maxFoundFreq = f_line;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if (tHistory.empty() || tHistory[0].isEmpty()) continue;
+
+        int M_time = tHistory.size();
+        Eigen::MatrixXd lofar_mat = Eigen::MatrixXd::Zero(M_time, half_fft);
+        for (int r = 0; r < M_time; ++r) {
+            for (int c = 0; c < half_fft; ++c) lofar_mat(r, c) = tHistory[r][c];
+        }
+
+        Eigen::RowVectorXd center_freq, f_stft, t_stft;
+        Eigen::MatrixXd Z_TPSW;
+        Eigen::MatrixXi counter;
+
+        // 【修改】：使用配置中的 DP 算法硬核参数！
+        detect_line_spectrum_from_lofar_change(lofar_mat, fs, NFFT_R, center_freq, Z_TPSW, counter, f_stft, t_stft,
+                                               m_config.tpswG, m_config.tpswE, 1.15, m_config.dpL, m_config.dpAlpha, m_config.dpBeta, m_config.dpGamma);
+
+        OfflineTargetResult offRes;
+        offRes.targetId = tid;
+        offRes.startAngle = startAng;
+        offRes.timeFrames = M_time;
+        offRes.freqBins = half_fft;
+        offRes.minTime = history_frames.front().timestamp;
+        offRes.maxTime = history_frames.back().timestamp;
+        if (std::abs(offRes.maxTime - offRes.minTime) < 0.1) offRes.maxTime += 3.0;
+
+        if (minFoundFreq > maxFoundFreq) {
+            offRes.displayFreqMin = m_config.lofarMin;
+            offRes.displayFreqMax = m_config.lofarMax;
+        } else {
+            offRes.displayFreqMin = std::max(0.0, minFoundFreq - 15.0);
+            offRes.displayFreqMax = std::min(fs / 2.0, maxFoundFreq + 15.0);
+        }
+
+        offRes.rawLofarDb.resize(M_time * half_fft);
+        offRes.tpswLofarDb.resize(M_time * half_fft);
+        offRes.dpCounter.resize(M_time * half_fft);
+
+        for (int r = 0; r < M_time; ++r) {
+            for (int c = 0; c < half_fft; ++c) {
+                int idx = r * half_fft + c;
+                offRes.rawLofarDb[idx] = 10.0 * log10(lofar_mat(r, c) + 1e-12);
+                offRes.tpswLofarDb[idx] = 10.0 * log10(Z_TPSW(r, c) + 1e-12);
+                offRes.dpCounter[idx] = (counter(c, r) >= 4) ? counter(c, r) : 0.0;
+            }
+        }
+        offResults.append(offRes);
+    }
+
+    emit offlineResultsReady(offResults);
+
+    fftw_destroy_plan(plan_ifft); fftw_free(demon_ifft_in); fftw_free(demon_ifft_out);
+    fftw_destroy_plan(plan_fft);  fftw_free(demon_fft_in);  fftw_free(demon_fft_out);
+    emit processingFinished();
+}

@@ -310,15 +310,15 @@ void detect_line_spectrum_from_lofar_change(
     }
     sort(line_spectrum_center_freq.data(), line_spectrum_center_freq.data() + line_spectrum_center_freq.size());
 
-    // 调试输出
-    cout << "==================================== 线谱检测结果 ====================================" << endl;
-    cout << "LOFAR矩阵维度：" << M_time << "（时间）×" << N_freq << "（频率）" << endl;
-    cout << "检测到线谱数量：" << line_spectrum_center_freq.size() << " 个" << endl;
-    cout << "物理频率分辨率：" << fixed << setprecision(6) << freq_res << " Hz" << endl;
-    cout << "计数阈值：" << counter_thresh << "，分组阈值：" << fixed << setprecision(6) << group_thresh << " Hz" << endl;
-    cout << "线谱中心频率（Hz）：";
-    for (int g = 0; g < line_spectrum_center_freq.size(); ++g) {
-        cout << fixed << setprecision(3) << line_spectrum_center_freq(g) << "  ";
-    }
-    cout << endl << "=====================================================================================" << endl;
+//    // 调试输出
+//    cout << "==================================== 线谱检测结果 ====================================" << endl;
+//    cout << "LOFAR矩阵维度：" << M_time << "（时间）×" << N_freq << "（频率）" << endl;
+//    cout << "检测到线谱数量：" << line_spectrum_center_freq.size() << " 个" << endl;
+//    cout << "物理频率分辨率：" << fixed << setprecision(6) << freq_res << " Hz" << endl;
+//    cout << "计数阈值：" << counter_thresh << "，分组阈值：" << fixed << setprecision(6) << group_thresh << " Hz" << endl;
+//    cout << "线谱中心频率（Hz）：";
+//    for (int g = 0; g < line_spectrum_center_freq.size(); ++g) {
+//        cout << fixed << setprecision(3) << line_spectrum_center_freq(g) << "  ";
+//    }
+//    cout << endl << "=====================================================================================" << endl;
 }

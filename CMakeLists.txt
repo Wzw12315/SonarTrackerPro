@@ -52,6 +52,8 @@ set(SOURCES
     src/core/Deconvolution.h
     src/core/detect_line_spectrum_from_lofar_change.h
     src/core/detect_line_spectrum_from_lofar_change.cpp
+    src/core/fir2.h
+    src/core/fir2.cpp
     3rdparty/qcustomplot/qcustomplot.cpp
     3rdparty/qcustomplot/qcustomplot.h
 )
