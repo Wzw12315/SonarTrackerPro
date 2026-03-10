@@ -74,6 +74,9 @@ private:
     QLineEdit* m_editDpBeta;
     QLineEdit* m_editDpGamma;
 
+    // 【新增】DCV 迭代次数参数输入框
+    QLineEdit* m_editDcvRlIter;
+
     QPushButton* m_btnSelectFiles;
     QPushButton* m_btnStart;
     QPushButton* m_btnPauseResume;

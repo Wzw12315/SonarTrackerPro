@@ -15,9 +15,11 @@ struct DspConfig {
     double r_scan = 9000.0;
     double timeStep = 3.0;
 
+    // 【新增】DCV 反卷积 RL 迭代次数
+    int dcvRlIter = 20;
     // 频带与谱估计
-    double lofarMin = 80.0;
-    double lofarMax = 250.0;
+    double lofarMin = 100.0;
+    double lofarMax = 300.0;
     double demonMin = 350.0;
     double demonMax = 2000.0;
     int nfftR = 15000;

@@ -214,6 +214,12 @@ void MainWindow::setupUi() {
     fDp->addRow("偏置因子 Gamma:", m_editDpGamma = new QLineEdit("0.1"));
     paramLayout->addWidget(gDp);
 
+    // 【新增】DCV 高分辨参数组
+    QGroupBox* gDcv = new QGroupBox("高分辨反卷积 (DCV) 设置", paramContainer);
+    QFormLayout* fDcv = new QFormLayout(gDcv);
+    fDcv->addRow("RL 迭代次数:", m_editDcvRlIter = new QLineEdit("20"));
+    paramLayout->addWidget(gDcv);
+
     paramScroll->setWidget(paramContainer);
     leftLayout->addWidget(paramScroll, 2);
 
@@ -369,6 +375,9 @@ void MainWindow::onStartClicked() {
     m_currentConfig.dpBeta = m_editDpBeta->text().toDouble();
     m_currentConfig.dpGamma = m_editDpGamma->text().toDouble();
 
+    // 【新增】DCV 迭代次数
+    m_currentConfig.dcvRlIter = m_editDcvRlIter->text().toInt();
+
     m_btnStart->setEnabled(false); m_btnSelectFiles->setEnabled(false);
     m_btnPauseResume->setEnabled(true); m_btnStop->setEnabled(true);
     m_mainTabWidget->setCurrentIndex(0);
@@ -416,11 +425,8 @@ void MainWindow::onStopClicked() {
     }
 }
 
-
-
-
 // =========================================================================
-// 【核心修改】：实现文本报表一键导出功能 (修复了中文乱码问题)
+// 实现文本报表一键导出功能 (修复了中文乱码问题)
 // =========================================================================
 void MainWindow::onExportClicked() {
     if (m_reportConsole->toPlainText().isEmpty() && m_logConsole->toPlainText().isEmpty()) {
@@ -441,17 +447,11 @@ void MainWindow::onExportClicked() {
 
     QTextStream out(&file);
 
-    // ==========================================================
-    // 【彻底修复乱码的核⼼代码】
-    // 强制 QTextStream 使用 UTF-8 编码，并写入 BOM (Byte Order Mark) 头
-    // 这样 Windows 记事本打开时会自动识别为 UTF-8，绝对不会再乱码！
-    // ==========================================================
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     out.setCodec("UTF-8");
 #endif
     out.setGenerateByteOrderMark(true);
 
-    // 使用 QString 包裹硬编码的中文字符串，确保底层以 Unicode 安全传递
     out << "======================================================\n";
     out << QString("          SonarTrackerPro 综合分析导出报表\n");
     out << QString("          导出时间: ") << QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss") << "\n";
@@ -469,6 +469,7 @@ void MainWindow::onExportClicked() {
     appendLog(QString("\n>> 成功：分析报表已完整导出至 %1\n").arg(fileName));
     QMessageBox::information(this, "导出成功", "综合评估报表及运行日志已成功导出！\n(注：图表图片请在对应图表上右键保存)");
 }
+
 void MainWindow::createTargetPlots(int targetId) {
     QCustomPlot* lsPlot = new QCustomPlot(this);
     setupPlotInteraction(lsPlot);
